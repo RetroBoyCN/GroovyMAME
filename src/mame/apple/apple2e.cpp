@@ -10,7 +10,7 @@
 
 
     IIe: base of this driver.  64K RAM, slot 0 language card emulation without the double-read requirement,
-         lowercase and SHIFT key on button 2, Open and Solid Apple buttons on joy buttons 0 and 1,
+         lowercase, Open and Solid Apple buttons on joy buttons 0 and 1,
          auxiliary slot, built-in 80 column support if extra RAM added.
 
          Physical slot 0 was eliminated thanks to the built-in language card.
@@ -36,11 +36,12 @@
 
     IIe enhanced: 65C02 CPU with more instructions, MouseText in the character generator.
 
-    IIe platinum: Like enhanced but with added numeric keypad and extended 80-column card
-         included in the box.  Keypad CLEAR generates ESC by default, one hardware mod
-         made it generate CTRL-X instead.  (new keyboard encoder ROM?)
+    IIe Platinum: Like enhanced but with added numeric keypad and extended 80-column card
+         included in the box.  SHIFT key on button 2, keypad CLEAR generates ESC by default,
+         one hardware mod made it generate CTRL-X instead.  (new keyboard encoder ROM?)
 
-    NOTE: On real IIe and IIe enhanced h/w, pressing SHIFT and paddle button 2 will
+    NOTE: On IIe Platinum h/w (or IIe and IIe enhanced, if pad X6 on the motherboard
+    is soldered to enable the SHIFT key mod), pressing SHIFT and paddle button 2 will
     short out the power supply and cause a safety shutdown.  (We don't emulate
     this "feature", and it was relatively rare in real life as Apple joysticks only
     had buttons 0 and 1 normally).
@@ -60,6 +61,10 @@
      between QWERTY and DVORAK layouts on models without localized keyboards.
      On models with localized keyboards, it switches between US QWERTY
      and the local keyboard layout and character set.
+
+     Early IIcs have no 1.8432 MHz XTAL for the ACIAs, which instead use the
+     master clock divided by 8 (~1.789 MHz), producing baud rates 2.9% slower
+     than nominal.  This was fixed before the UniDisk ROM revision was released.
 
     IIc (UniDisk 3.5): IIc with ROM doubled to 32K and the ROMSWITCH register
          added to page between the original 16K ROM and the new added 16K.  The
@@ -251,8 +256,6 @@ public:
 		m_printer_conn(*this, "parallel"),
 		m_printer_out(*this, "laserprnout")
 	{
-		m_accel_laser = false;
-		m_has_laser_mouse = false;
 		m_isiic = false;
 		m_isiicplus = false;
 		m_iscec = false;
@@ -262,8 +265,11 @@ public:
 		m_isace2200 = false;
 		m_ace2200_axxx_bank = false;
 		m_pal = false;
+		m_shift_key_mod = false;
 		m_cur_floppy = nullptr;
 		m_devsel = 0;
+		m_has_laser_mouse = false;
+		m_accel_laser = false;
 		m_laser_speed = 0;
 		m_laser_fdc_on = false;
 	}
@@ -459,20 +465,21 @@ private:
 	bool m_intc8rom;
 	bool m_reset_latch;
 
-	bool m_isiic, m_isiicplus, m_iscec, m_iscecm, m_iscec2000, m_pal;
+	bool m_isiic, m_isiicplus, m_iscec, m_iscecm, m_iscec2000;
+	bool m_pal, m_shift_key_mod;
 	u8 m_migram[0x800];
 	u16 m_migpage;
 
 	bool m_isace500, m_isace2200, m_ace_cnxx_bank, m_ace2200_axxx_bank;
 	u16 m_ace500rombank;
 
+	bool m_has_laser_mouse;
+	bool m_laser_fdc_on;
+	bool m_accel_laser;
 	bool m_accel_unlocked;
 	bool m_accel_fast;
 	bool m_accel_present;
 	bool m_accel_temp_slowdown;
-	bool m_accel_laser;
-	bool m_has_laser_mouse;
-	bool m_laser_fdc_on;
 	int m_accel_stage;
 	u32 m_accel_speed;
 	u8 m_accel_slotspk, m_accel_gameio, m_laser_speed;
@@ -865,7 +872,7 @@ void apple2e_state::memexp_w(offs_t offset, u8 data)
 			break;
 
 		case 3:
-//            printf("Write %02x to RAM[%x]\n", data, m_liveptr);
+//          printf("Write %02x to RAM[%x]\n", data, m_exp_liveptr);
 			if (m_exp_liveptr <= m_exp_addrmask)
 			{
 				m_exp_ram[m_exp_liveptr] = data;
@@ -909,7 +916,7 @@ void apple2e_state::machine_start()
 	m_inh_bank = 0;
 
 	m_migpage = 0;
-	memset(m_migram, 0, 0x200);
+	memset(m_migram, 0, sizeof(m_migram));
 
 	// expansion RAM size
 	if (m_ram_size > (128*1024))
@@ -1275,6 +1282,8 @@ void apple2e_state::machine_reset()
 	}
 
 	m_exp_bankhior = 0xf0;
+	memset(m_exp_regs, 0, sizeof(m_exp_regs));
+	m_exp_wptr = m_exp_liveptr = 0;
 
 	// sync up the banking with the variables.
 	lcrom_update();
@@ -1343,7 +1352,7 @@ TIMER_DEVICE_CALLBACK_MEMBER(apple2e_state::apple2_interrupt)
 	// update character selection
 	if (m_kbd_lang_sel)
 	{
-		u8 charset_id = m_kbd_lang_sel->read() & 0x0f;
+		const u8 charset_id = m_kbd_lang_sel->read() & 0x0f;
 		if (m_video->get_iie_langsw() != charset_id)
 		{
 			m_video->set_iie_langsw(charset_id);
@@ -1727,7 +1736,8 @@ void apple2e_state::cec_lcrom_update()
 // most softswitches don't care about read vs write, so handle them here
 void apple2e_state::do_io(int offset)
 {
-	if(machine().side_effects_disabled()) return;
+	if (machine().side_effects_disabled())
+		return;
 
 	// Handle C058-C05F according to IOUDIS
 	if ((offset & 0xf8) == 0x58)
@@ -1978,8 +1988,8 @@ void apple2e_state::do_io(int offset)
 
 u8 apple2e_state::c000_r(offs_t offset)
 {
-	if(machine().side_effects_disabled()) return read_floatingbus();
-	const u8 uFloatingBus7 = read_floatingbus() & 0x7f;
+	const u8 uFloatingBus = read_floatingbus(); // video side-effects latch after reading
+	const u8 uFloatingBus7 = uFloatingBus & 0x7f;
 
 	if ((offset & 0xf0) == 0x00) // keyboard latch, $C000 is really 00-0F
 	{
@@ -1990,8 +2000,9 @@ u8 apple2e_state::c000_r(offs_t offset)
 	{
 		case 0x10:  // read any key down, reset keyboard strobe
 			{
-				u8 rv = m_transchar | (m_anykeydown ? 0x80 : 0x00);
-				m_strobe = 0;
+				const u8 rv = m_transchar | (m_anykeydown ? 0x80 : 0x00);
+				if (!machine().side_effects_disabled())
+					m_strobe = 0;
 				return rv;
 			}
 
@@ -2042,26 +2053,27 @@ u8 apple2e_state::c000_r(offs_t offset)
 
 		case 0x26:  // Ace 2x00 DIP switches
 			if (m_isace2200)
-			{
 				return (m_sysconfig->read() & 0x80) | uFloatingBus7;
-			}
 			break;
 
 		case 0x27: // Ace 2x00 F key strobe
 			if (m_isace2200)
 			{
-				m_strobe = 0;
 				const u8 rv = m_franklin_strobe;
-				m_franklin_strobe = 0x80;
+				if (!machine().side_effects_disabled())
+				{
+					m_strobe = 0;
+					m_franklin_strobe = 0x80;
+				}
 				return rv;
 			}
 			break;
 
-		case 0x60: // cassette in
+		case 0x60: // cassette in, inverted
 		case 0x68:
 			if (m_cassette)
 			{
-				return (m_cassette->input() > 0.0 ? 0x80 : 0) | uFloatingBus7;
+				return (m_cassette->input() > 0.0 ? 0 : 0x80) | uFloatingBus7;
 			}
 			return uFloatingBus7;
 
@@ -2073,28 +2085,32 @@ u8 apple2e_state::c000_r(offs_t offset)
 		case 0x6a:
 			return ((m_gameio->sw1_r() || (m_kbspecial->read() & 0x20)) ? 0x80 : 0) | uFloatingBus7;
 
-		case 0x63:  // button 2 or SHIFT key
+		case 0x63:  // button 2, inverted (or SHIFT key, on IIe Platinum)
 		case 0x6b:
-			return ((m_gameio->sw2_r() || (m_kbspecial->read() & 0x06)) ? 0x80 : 0) | uFloatingBus7;
+			return ((m_gameio->sw2_r() || ((m_shift_key_mod) && (m_kbspecial->read() & 0x06))) ? 0 : 0x80) | uFloatingBus7;
 
 		case 0x64:  // joy 1 X axis
 		case 0x6c:
-			if (!m_gameio->is_device_connected()) return 0x80 | uFloatingBus7;
+			if (!m_gameio->is_device_connected())
+				return 0x80 | uFloatingBus7;
 			return ((machine().time().as_double() < m_joystick_x1_time) ? 0x80 : 0) | uFloatingBus7;
 
 		case 0x65:  // joy 1 Y axis
 		case 0x6d:
-			if (!m_gameio->is_device_connected()) return 0x80 | uFloatingBus7;
+			if (!m_gameio->is_device_connected())
+				return 0x80 | uFloatingBus7;
 			return ((machine().time().as_double() < m_joystick_y1_time) ? 0x80 : 0) | uFloatingBus7;
 
 		case 0x66: // joy 2 X axis
 		case 0x6e:
-			if (!m_gameio->is_device_connected()) return 0x80 | uFloatingBus7;
+			if (!m_gameio->is_device_connected())
+				return 0x80 | uFloatingBus7;
 			return ((machine().time().as_double() < m_joystick_x2_time) ? 0x80 : 0) | uFloatingBus7;
 
 		case 0x67: // joy 2 Y axis
 		case 0x6f:
-			if (!m_gameio->is_device_connected()) return 0x80 | uFloatingBus7;
+			if (!m_gameio->is_device_connected())
+				return 0x80 | uFloatingBus7;
 			return ((machine().time().as_double() < m_joystick_y2_time) ? 0x80 : 0) | uFloatingBus7;
 
 		// Apple IIe Technical Reference (1985/1987) lists RDIOUDIS and RDDHIRES,
@@ -2126,13 +2142,12 @@ u8 apple2e_state::c000_r(offs_t offset)
 			break;
 	}
 
-	return read_floatingbus();
+	return uFloatingBus;
 }
 
 u8 apple2e_state::c000_iic_r(offs_t offset)
 {
-	if(machine().side_effects_disabled()) return read_floatingbus();
-	u8 uFloatingBus7 = read_floatingbus() & 0x7f;
+	const u8 uFloatingBus7 = read_floatingbus() & 0x7f;
 
 	switch (offset)
 	{
@@ -2162,18 +2177,16 @@ u8 apple2e_state::c000_iic_r(offs_t offset)
 		case 0x60: // 40/80 column switch (IIc and Franklin ACE 500 only)
 			return ((m_sysconfig.read_safe(0) & 0x40) ? 0x80 : 0) | uFloatingBus7;
 
-		case 0x63:  // mouse button 2 (no other function on IIc)
+		case 0x63:  // mouse button 2, inverted (no other function on IIc)
 		case 0x6b:
 			return (m_mouseb->read() ? 0 : 0x80) | uFloatingBus7;
 
 		case 0x66: // mouse X1 (IIc only)
 		case 0x6e:
-			if (!m_gameio->is_device_connected()) return 0x80 | uFloatingBus7;
 			return (m_x1 ? 0x80 : 0) | uFloatingBus7;
 
 		case 0x67: // mouse Y1 (IIc only)
 		case 0x6f:
-			if (!m_gameio->is_device_connected()) return 0x80 | uFloatingBus7;
 			return (m_y1 ? 0x80 : 0) | uFloatingBus7;
 
 		case 0x78: case 0x7a: case 0x7c: case 0x7e:  // read IOUDIS
@@ -2190,7 +2203,7 @@ u8 apple2e_state::c000_iic_r(offs_t offset)
 
 u8 apple2e_state::c000_laser_r(offs_t offset)
 {
-	u8 uFloatingBus7 = read_floatingbus() & 0x7f;
+	const u8 uFloatingBus7 = read_floatingbus() & 0x7f;
 
 	switch (offset)
 	{
@@ -2261,14 +2274,9 @@ void apple2e_state::c000_laser_w(offs_t offset, u8 data)
 
 u8 apple2e_state::laserprn_busy_r()
 {
-	u8 retval = read_floatingbus() & 0x7f;
+	const u8 uFloatingBus7 = read_floatingbus() & 0x7f;
 
-	if (m_centronics_busy)
-	{
-		retval |= 0x80;
-	}
-
-	return retval;
+	return (m_centronics_busy ? 0x80 : 0) | uFloatingBus7;
 }
 
 void apple2e_state::laserprn_w(u8 data)
@@ -2606,7 +2614,7 @@ void apple2e_state::update_iic_mouse()
 
 u8 apple2e_state::laser_mouse_r(offs_t offset)
 {
-	u8 uFloatingBus7 = read_floatingbus() & 0x7f;
+	const u8 uFloatingBus7 = read_floatingbus() & 0x7f;
 
 	switch (offset)
 	{
@@ -3593,7 +3601,7 @@ void apple2e_state::ay3600_data_ready_w(int state)
 
 		if (m_kbd_lang_sel)
 		{
-			u8 kbd_layout_id = (m_kbd_lang_sel->read() & 0xf0) >> 4;
+			const u8 kbd_layout_id = (m_kbd_lang_sel->read() & 0xf0) >> 4;
 			trans += kbd_layout_id * 0x400; // go to second half of the ROM (DVORAK on US IIc/IIe models) or beyond
 		}
 
@@ -3760,7 +3768,7 @@ INPUT_PORTS_END
 	*/
 
 	/*
-	  Apple IIe platinum key matrix
+	  Apple IIe Platinum key matrix
 
 	      | Y0  | Y1  | Y2  | Y3  | Y4  | Y5  | Y6  | Y7  | Y8  | Y9  |
 	      |     |     |     |     |     |     |     |     |     |     |
@@ -4998,11 +5006,12 @@ void apple2e_state::tk3000(machine_config &config)
 void apple2e_state::apple2ep(machine_config &config)
 {
 	apple2ee(config);
+	m_shift_key_mod = true; // see Apple IIe Technical Note #9
 }
 
 void apple2e_state::apple2eppal(machine_config &config)
 {
-	apple2ee(config);
+	apple2ep(config);
 	m_maincpu->set_clock(1016966);
 	m_screen->set_raw(1016966 * 14, (65 * 7) * 2, 0, (40 * 7) * 2, 312, 0, 192);
 }
@@ -5030,7 +5039,7 @@ void apple2e_state::apple2c(machine_config &config)
 	config.device_remove("sl7");
 
 	MOS6551(config, m_acia1, 0);
-	m_acia1->set_xtal(XTAL(14'318'181) / 8); // ~1.789 MHz
+	m_acia1->set_xtal(1.8432_MHz_XTAL);
 	m_acia1->txd_handler().set(PRINTER_PORT_TAG, FUNC(rs232_port_device::write_txd));
 	m_acia1->irq_handler().set(FUNC(apple2e_state::a2bus_irq_w));
 
@@ -5621,7 +5630,7 @@ ROM_START(tk3000)
 	ROM_LOAD( "tk3000.f4f6",  0x000000, 0x004000, CRC(5b1e8ab2) SHA1(f163e5753c18ff0e812a448e8da406f102600edf) )
 
 	ROM_REGION(0x2000, "kbdcpu", 0)
-	ROM_LOAD( "tk3000.e13",   0x000000, 0x002000, CRC(f9b860d3) SHA1(6a127f1458f43a00199d3dde94569b8928f05a53) )
+	ROM_LOAD( "tk3000.e13",   0x000000, 0x002000, BAD_DUMP CRC(f9b860d3) SHA1(6a127f1458f43a00199d3dde94569b8928f05a53) ) // seems underdumped; PCB photos show a 16Kx8 ROM here (27128)
 
 	ROM_REGION(0x800, "keyboard", ROMREGION_ERASE00)
 	ROM_LOAD( "342-0132-c.e12", 0x000, 0x800, BAD_DUMP CRC(e47045f4) SHA1(12a2e718f5f4acd69b6c33a45a4a940b1440a481) ) // probably not this machine's actual ROM
