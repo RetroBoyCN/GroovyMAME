@@ -549,8 +549,6 @@ char const *const renderer_bgfx::WINDOW_PREFIX = "Window 0, ";
 //============================================================
 
 uint32_t renderer_bgfx::s_current_view = 0;
-uint32_t renderer_bgfx::s_width[16] = { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
-uint32_t renderer_bgfx::s_height[16] = { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
 
 
 
@@ -633,8 +631,8 @@ renderer_bgfx::renderer_bgfx(osd_window &window, parent_module &parent)
 	, m_texture_cache(nullptr)
 	, m_dimensions(0, 0)
 	, m_max_view(0)
-	, m_avi_view(nullptr)
-	, m_avi_writer(nullptr)
+	, m_avi_view()
+	, m_avi_writer()
 	, m_avi_target(nullptr)
 	, m_load_sub(parent.subscribe_load(&renderer_bgfx::load_config, this))
 	, m_save_sub(parent.subscribe_save(&renderer_bgfx::save_config, this))
@@ -677,7 +675,7 @@ renderer_bgfx::~renderer_bgfx()
 
 	bgfx::reset(0, 0, BGFX_RESET_NONE);
 
-	if (m_avi_writer != nullptr && m_avi_writer->recording())
+	if (m_avi_writer && m_avi_writer->recording())
 	{
 		m_avi_writer->stop();
 
@@ -686,9 +684,9 @@ renderer_bgfx::~renderer_bgfx()
 
 		bgfx::destroy(m_avi_texture);
 
-		delete m_avi_writer;
-		delete [] m_avi_data;
-		delete m_avi_view;
+		m_avi_writer.reset();
+		m_avi_data.reset();
+		m_avi_view.reset();
 	}
 
 	// destroy vblank thread
@@ -704,9 +702,7 @@ renderer_bgfx::~renderer_bgfx()
 int renderer_bgfx::create()
 {
 	const osd_dim wdim = window().get_size_pixels();
-	s_width[window().index()] = wdim.width();
-	s_height[window().index()] = wdim.height();
-	m_dimensions = wdim;
+	m_dimensions = m_new_dimensions = wdim;
 
 	// finish creating the renderer
 	m_textures = std::make_unique<texture_manager>();
@@ -715,9 +711,9 @@ int renderer_bgfx::create()
 	if (window().index() != 0)
 	{
 #ifdef OSD_WINDOWS
-		m_framebuffer = m_targets->create_backbuffer(dynamic_cast<win_window_info &>(window()).platform_window(), s_width[window().index()], s_height[window().index()]);
+		m_framebuffer = m_targets->create_backbuffer(dynamic_cast<win_window_info &>(window()).platform_window(), wdim.width(), wdim.height());
 #elif defined(OSD_MAC)
-		m_framebuffer = m_targets->create_backbuffer(GetOSWindow(dynamic_cast<mac_window_info &>(window()).platform_window()), s_width[window().index()], s_height[window().index()]);
+		m_framebuffer = m_targets->create_backbuffer(GetOSWindow(dynamic_cast<mac_window_info &>(window()).platform_window()), wdim.width(), wdim.height());
 #else
 		auto const [winhdl, success] = sdlNativeWindowHandle(dynamic_cast<sdl_window_info &>(window()).platform_window());
 		if (!success)
@@ -726,7 +722,7 @@ int renderer_bgfx::create()
 			m_textures.reset();
 			return -1;
 		}
-		m_framebuffer = m_targets->create_backbuffer(winhdl, s_width[window().index()], s_height[window().index()]);
+		m_framebuffer = m_targets->create_backbuffer(winhdl, wdim.width(), wdim.height());
 #endif
 		bgfx::touch(window().index());
 
@@ -784,11 +780,11 @@ void renderer_bgfx::record()
 	if (window().index() > 0)
 		return;
 
-	if (m_avi_writer == nullptr)
+	if (!m_avi_writer)
 	{
-		m_avi_writer = new avi_write(window().machine(), s_width[0], s_height[0]);
-		m_avi_data = new uint8_t[s_width[0] * s_height[0] * 4];
-		m_avi_bitmap.allocate(s_width[0], s_height[0]);
+		m_avi_writer.reset(new avi_write(window().machine(), m_new_dimensions.width(), m_new_dimensions.height()));
+		m_avi_data.reset(new uint8_t[m_new_dimensions.width() * m_dimensions.height() * 4]);
+		m_avi_bitmap.allocate(m_new_dimensions.width(), m_new_dimensions.height());
 	}
 
 	if (m_avi_writer->recording())
@@ -797,18 +793,17 @@ void renderer_bgfx::record()
 		m_targets->destroy_target("avibuffer0");
 		m_avi_target = nullptr;
 		bgfx::destroy(m_avi_texture);
-		delete m_avi_view;
-		m_avi_view = nullptr;
+		m_avi_view.reset();
 	}
 	else
 	{
 		m_avi_writer->record(m_module().options().bgfx_avi_name());
-		m_avi_target = m_targets->create_target("avibuffer", bgfx::TextureFormat::BGRA8, s_width[0], s_height[0], 1, 1, TARGET_STYLE_CUSTOM, false, true, 1, 0);
-		m_avi_texture = bgfx::createTexture2D(s_width[0], s_height[0], false, 1, bgfx::TextureFormat::BGRA8, BGFX_TEXTURE_BLIT_DST | BGFX_TEXTURE_READ_BACK);
+		m_avi_target = m_targets->create_target("avibuffer", bgfx::TextureFormat::BGRA8, m_new_dimensions.width(), m_new_dimensions.height(), 1, 1, TARGET_STYLE_CUSTOM, false, true, 1, 0);
+		m_avi_texture = bgfx::createTexture2D(m_new_dimensions.width(), m_new_dimensions.height(), false, 1, bgfx::TextureFormat::BGRA8, BGFX_TEXTURE_BLIT_DST | BGFX_TEXTURE_READ_BACK);
 
-		if (m_avi_view == nullptr)
+		if (!m_avi_view)
 		{
-			m_avi_view = new bgfx_ortho_view(this, 10, m_avi_target, m_seen_views);
+			m_avi_view.reset(new bgfx_ortho_view(this, 10, m_avi_target, m_seen_views));
 		}
 	}
 }
@@ -920,7 +915,7 @@ void renderer_bgfx::render_post_screen_quad(int view, render_primitive* prim, bg
 	bgfx_uniform* inv_view_dims = m_screen_effect[blend]->uniform("u_inv_view_dims");
 	if (inv_view_dims)
 	{
-		float values[2] = { -1.0f / s_width[window_index], 1.0f / s_height[window_index] };
+		float values[2] = { -1.0f / m_dimensions.width(), 1.0f / m_dimensions.height() };
 		inv_view_dims->set(values, sizeof(float) * 2);
 		inv_view_dims->upload();
 	}
@@ -933,15 +928,15 @@ void renderer_bgfx::render_avi_quad()
 	m_avi_view->set_index(s_current_view);
 	m_avi_view->setup();
 
-	bgfx::setViewRect(s_current_view, 0, 0, s_width[0], s_height[0]);
+	bgfx::setViewRect(s_current_view, 0, 0, m_avi_bitmap.width(), m_avi_bitmap.height());
 	bgfx::setViewClear(s_current_view, BGFX_CLEAR_COLOR | BGFX_CLEAR_DEPTH, 0x000000ff, 1.0f, 0);
 
 	bgfx::TransientVertexBuffer buffer;
 	bgfx::allocTransientVertexBuffer(&buffer, 6, ScreenVertex::ms_decl);
 	auto* vertices = reinterpret_cast<ScreenVertex*>(buffer.data);
 
-	float x[4] = { 0.0f, float(s_width[0]), 0.0f, float(s_width[0]) };
-	float y[4] = { 0.0f, 0.0f, float(s_height[0]), float(s_height[0]) };
+	float x[4] = { 0.0f, float(m_avi_bitmap.width()), 0.0f, float(m_avi_bitmap.width()) };
+	float y[4] = { 0.0f, 0.0f, float(m_avi_bitmap.height()), float(m_avi_bitmap.height()) };
 	float u[4] = { 0.0f, 1.0f, 0.0f, 1.0f };
 	float v[4] = { 0.0f, 0.0f, 1.0f, 1.0f };
 	uint32_t rgba = 0xffffffff;
@@ -960,7 +955,7 @@ void renderer_bgfx::render_avi_quad()
 	bgfx_uniform* inv_view_dims = effect->uniform("u_inv_view_dims");
 	if (inv_view_dims)
 	{
-		float values[2] = { -1.0f / s_width[0], 1.0f / s_height[0] };
+		float values[2] = { -1.0f / m_avi_bitmap.width(), 1.0f / m_avi_bitmap.height() };
 		inv_view_dims->set(values, sizeof(float) * 2);
 		inv_view_dims->upload();
 	}
@@ -1019,7 +1014,7 @@ void renderer_bgfx::render_textured_quad(render_primitive* prim, bgfx::Transient
 	bgfx_uniform* inv_view_dims = effects[blend]->uniform("u_inv_view_dims");
 	if (inv_view_dims)
 	{
-		float values[2] = { -1.0f / s_width[window_index], 1.0f / s_height[window_index] };
+		float values[2] = { -1.0f / m_dimensions.width(), 1.0f / m_dimensions.height() };
 		inv_view_dims->set(values, sizeof(float) * 2);
 		inv_view_dims->upload();
 	}
@@ -1248,9 +1243,7 @@ int renderer_bgfx::draw(int update)
 	if (m_ortho_view)
 		m_ortho_view->set_index(UINT_MAX);
 
-	osd_dim wdim = window().get_size_pixels();
-	s_width[window_index] = wdim.width();
-	s_height[window_index] = wdim.height();
+	m_new_dimensions = window().get_size_pixels();
 
 	// Set view 0 default viewport.
 	if (window_index == 0)
@@ -1337,7 +1330,7 @@ int renderer_bgfx::draw(int update)
 			bgfx_uniform* inv_view_dims = m_gui_effect[blend]->uniform("u_inv_view_dims");
 			if (inv_view_dims)
 			{
-				float values[2] = { -1.0f / s_width[window_index], 1.0f / s_height[window_index] };
+				float values[2] = { -1.0f / m_dimensions.width(), 1.0f / m_dimensions.height() };
 				inv_view_dims->set(values, sizeof(float) * 2);
 				inv_view_dims->upload();
 			}
@@ -1361,7 +1354,7 @@ int renderer_bgfx::draw(int update)
 	// process submitted rendering primitives.
 	if (window_index == 0)
 	{
-		if (m_avi_writer != nullptr && m_avi_writer->recording() && window_index == 0)
+		if (m_avi_writer && m_avi_writer->recording() && window_index == 0)
 		{
 			render_avi_quad();
 			bgfx::touch(s_current_view);
@@ -1382,7 +1375,7 @@ int renderer_bgfx::draw(int update)
 void renderer_bgfx::update_recording()
 {
 	bgfx::blit(s_current_view > 0 ? s_current_view - 1 : 0, m_avi_texture, 0, 0, bgfx::getTexture(m_avi_target->target()));
-	bgfx::readTexture(m_avi_texture, m_avi_data);
+	bgfx::readTexture(m_avi_texture, m_avi_data.get());
 
 	int i = 0;
 	for (int y = 0; y < m_avi_bitmap.height(); y++)
@@ -1401,7 +1394,7 @@ void renderer_bgfx::update_recording()
 
 void renderer_bgfx::add_audio_to_recording(const int16_t *buffer, int samples_this_frame)
 {
-	if (m_avi_writer != nullptr && m_avi_writer->recording() && window().index() == 0)
+	if (m_avi_writer && m_avi_writer->recording() && window().index() == 0)
 	{
 		m_avi_writer->audio_frame(buffer, samples_this_frame);
 	}
@@ -1409,26 +1402,25 @@ void renderer_bgfx::add_audio_to_recording(const int16_t *buffer, int samples_th
 
 bool renderer_bgfx::update_dimensions()
 {
-	const uint32_t window_index = window().index();
-	const uint32_t width = s_width[window_index];
-	const uint32_t height = s_height[window_index];
 
 	bool new_handle_vsync = m_sync.handle_throttle();
 
-	if (m_dimensions != osd_dim(width, height) || m_handle_vsync != new_handle_vsync)
+	if (m_dimensions != m_new_dimensions || m_handle_vsync != new_handle_vsync)
 	{
 		m_handle_vsync = new_handle_vsync;
-		bgfx::reset(width, height, video_config.waitvsync && !m_handle_vsync? BGFX_RESET_VSYNC : BGFX_RESET_NONE);
-		m_dimensions = osd_dim(width, height);
-
-		if (window().index() != 0)
+		m_dimensions = m_new_dimensions;
+		if (window().index() == 0)
+		{
+			bgfx::reset(m_dimensions.width(), m_dimensions.height(), video_config.waitvsync && !m_handle_vsync? BGFX_RESET_VSYNC : BGFX_RESET_NONE);
+		}
+		else
 		{
 #ifdef OSD_WINDOWS
-			m_framebuffer = m_targets->create_backbuffer(dynamic_cast<win_window_info &>(window()).platform_window(), width, height);
+			m_framebuffer = m_targets->create_backbuffer(dynamic_cast<win_window_info &>(window()).platform_window(), m_dimensions.width(), m_dimensions.height());
 #elif defined(OSD_MAC)
-			m_framebuffer = m_targets->create_backbuffer(GetOSWindow(dynamic_cast<mac_window_info &>(window()).platform_window()), width, height);
+			m_framebuffer = m_targets->create_backbuffer(GetOSWindow(dynamic_cast<mac_window_info &>(window()).platform_window()), m_dimensions.width(), m_dimensions.height());
 #else
-			m_framebuffer = m_targets->create_backbuffer(sdlNativeWindowHandle(dynamic_cast<sdl_window_info &>(window()).platform_window()).first, width, height);
+			m_framebuffer = m_targets->create_backbuffer(sdlNativeWindowHandle(dynamic_cast<sdl_window_info &>(window()).platform_window()).first, m_dimensions.width(), m_dimensions.height());
 #endif
 			if (m_ortho_view)
 			{
@@ -1467,7 +1459,7 @@ render_primitive_list *renderer_bgfx::get_primitives()
 	bool chain_transform = false;
 
 	// check the first chain
-	bgfx_chain* chain = this->m_chains->screen_chain(0);
+	bgfx_chain *chain = this->m_chains->screen_chain(0);
 	if (chain != nullptr)
 	{
 		chain_transform = chain->transform();
@@ -1742,16 +1734,6 @@ std::vector<ui::menu_item> renderer_bgfx::get_slider_list()
 void renderer_bgfx::set_sliders_dirty()
 {
 	m_sliders_dirty = true;
-}
-
-uint32_t renderer_bgfx::get_window_width(uint32_t index) const
-{
-	return s_width[index];
-}
-
-uint32_t renderer_bgfx::get_window_height(uint32_t index) const
-{
-	return s_height[index];
 }
 
 

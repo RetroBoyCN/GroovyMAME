@@ -16,6 +16,7 @@
 #include "rendutil.h"
 
 #include <algorithm>
+#include <bit>
 #include <cstring>
 
 
@@ -67,7 +68,7 @@ inline bool menu_confswitch::switch_group_descriptor::matches(ioport_field const
 
 inline unsigned menu_confswitch::switch_group_descriptor::switch_count() const noexcept
 {
-	return (sizeof(mask) * 8) - count_leading_zeros_32(mask);
+	return std::bit_width(mask);
 }
 
 

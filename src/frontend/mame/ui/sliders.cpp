@@ -15,6 +15,8 @@
 #include "ui/ui.h"
 #include "rendutil.h"
 
+#include "input.h"
+
 #include "osdepend.h"
 
 
